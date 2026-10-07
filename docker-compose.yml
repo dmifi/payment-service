@@ -1,0 +1,102 @@
+name: payment-service
+
+x-app: &app
+  build: .
+  image: payment-service:local
+  env_file:
+    - path: .env  # optional overrides of any setting, see .env.example
+      required: false
+  environment:
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    API_KEY: ${API_KEY:-dev-api-key}
+    WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+    DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
+    RABBITMQ_URL: amqp://payments:payments@rabbitmq:5672/
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: payments
+      RABBITMQ_DEFAULT_PASS: payments
+    ports:
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"  # management UI
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      # As the broker user: run as root, the CLI may create an unreadable Erlang cookie on first boot.
+      test: ["CMD", "su-exec", "rabbitmq", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  migrations:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  outbox-relay:
+    <<: *app
+    command: ["python", "-m", "app.outbox"]
+    stop_grace_period: 20s
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "app.consumer"]
+    stop_grace_period: 30s  # in-flight payments are finished before shutdown
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  # Demo merchant endpoint for webhooks (tools/webhook_receiver.py), not part of the service.
+  webhook-receiver:
+    <<: *app
+    command: ["uvicorn", "tools.webhook_receiver:app", "--host", "0.0.0.0", "--port", "9000"]
+    ports:
+      - "${WEBHOOK_RECEIVER_PORT:-9000}:9000"
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
