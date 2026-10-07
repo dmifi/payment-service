@@ -85,19 +85,24 @@ class PaymentDetails(BaseModel):
         )
 
 
+WebhookEvent = Literal["payment.succeeded", "payment.failed"]
+
+_WEBHOOK_EVENTS: dict[PaymentStatus, WebhookEvent] = {
+    PaymentStatus.SUCCEEDED: "payment.succeeded",
+    PaymentStatus.FAILED: "payment.failed",
+}
+
+
 class PaymentWebhook(BaseModel):
     """Body of the POST request sent to `webhook_url` once the payment is processed."""
 
-    event: Literal["payment.succeeded", "payment.failed"]
+    event: WebhookEvent
     payment: PaymentDetails
 
     @classmethod
     def from_model(cls, payment: Payment) -> Self:
-        if payment.status == PaymentStatus.SUCCEEDED:
-            event: Literal["payment.succeeded", "payment.failed"] = "payment.succeeded"
-        elif payment.status == PaymentStatus.FAILED:
-            event: Literal["payment.succeeded", "payment.failed"] = "payment.failed"
-        else:
+        event = _WEBHOOK_EVENTS.get(payment.status)
+        if event is None:
             raise ValueError(f"Payment {payment.id} is not processed yet")
         return cls(event=event, payment=PaymentDetails.from_model(payment))
 
